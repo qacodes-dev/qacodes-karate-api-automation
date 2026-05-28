@@ -1,0 +1,5 @@
+firstname,lastname,totalprice,depositpaid,checkin,checkout,additionalneeds
+Alice,Smith,120,true,2025-02-01,2025-02-07,Breakfast
+Bob,Jones,200,false,2025-03-10,2025-03-15,Dinner
+Carol,White,75,true,2025-04-01,2025-04-03,Breakfast
+Dave,Black,350,false,2025-05-20,2025-05-25,Airport Transfer
