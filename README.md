@@ -1,6 +1,29 @@
 # Karate API Automation — Restful Booker
 
-A portfolio-quality API automation framework demonstrating Karate's feature-first approach, reusable calls, data-driven testing, schema validation, and parallel execution — all against the public [Restful Booker](https://restful-booker.herokuapp.com) API.
+A portfolio-quality API automation framework demonstrating Karate's feature-first approach, reusable calls, data-driven testing, schema validation, parallel execution, and **built-in mock server** — all modelled on the [Restful Booker](https://restful-booker.herokuapp.com) API.
+
+---
+
+## How the suite runs
+
+**By default the suite runs against a built-in Karate mock server** — no external dependency, no network, no throttling. The mock faithfully reproduces Restful Booker's API including its quirks (cookie auth, `DELETE → 201`, `ping → 201`, create-vs-get shape, invalid POST → 500). This makes runs:
+
+- **Deterministic** — identical results every time
+- **CI-stable** — no 418 / rate-limit / Heroku cold-start failures
+- **Fast** — the full 20-scenario suite completes in under 3 seconds
+- **Parallel-safe** — the mock is booted once per JVM via `callSingle`
+
+The real Restful Booker API is still supported as an opt-in mode:
+
+```bash
+# Default — uses built-in mock (CI-safe, no internet needed)
+mvn clean test
+
+# Opt-in — hits the live Restful Booker on Heroku
+mvn clean test -Dkarate.env=real
+```
+
+> **Note:** The live API may return 418 from CI/cloud IPs or throttle after repeated runs — which is exactly why the mock is the default.
 
 ---
 
@@ -9,6 +32,7 @@ A portfolio-quality API automation framework demonstrating Karate's feature-firs
 | Layer | Choice |
 |---|---|
 | Test DSL | [Karate 1.4.1](https://github.com/karatelabs/karate) |
+| Mock server | Karate built-in (`karate.start`) — no WireMock or external deps |
 | Runner | JUnit 5 via `karate-junit5` |
 | Build | Maven 3 |
 | Java | 17 |
@@ -17,38 +41,34 @@ A portfolio-quality API automation framework demonstrating Karate's feature-firs
 
 ---
 
-## API Under Test
+## API Under Test (and mock)
 
-**Base URL:** `https://restful-booker.herokuapp.com`
+**Mock base URL:** `http://localhost:<random-port>` (booted automatically)  
+**Real base URL:** `https://restful-booker.herokuapp.com` (opt-in with `-Dkarate.env=real`)
 
-Key behaviors worth knowing before reading the tests:
+Restful Booker quirks reproduced faithfully by the mock:
 
-| Endpoint | Status | Note |
+| Endpoint | Status | Quirk |
 |---|---|---|
-| `GET /ping` | **201** Created | Not 200 — assert 201 |
-| `POST /auth` | 200 | Returns `{"token":"..."}` in JSON body |
-| `POST /booking` | 200 | No auth required; response wraps fields under `booking` key |
+| `GET /ping` | **201** | Not 200 |
+| `POST /auth` (bad creds) | **200** | Returns `{"reason":"Bad credentials"}`, not 4xx |
+| `POST /booking` | 200 | Response wraps fields under `booking` key |
 | `GET /booking/{id}` | 200 | Flat response — no `booking` wrapper |
-| `PUT /booking/{id}` | 200 | Requires **cookie** `token=<value>`, not Bearer header |
-| `PATCH /booking/{id}` | 200 | Same cookie auth requirement |
-| `DELETE /booking/{id}` | **201** Created | Not 200/204 — assert 201 |
+| `PUT /booking/{id}` | 200 | Cookie `token` required — Bearer → 403 |
+| `PATCH /booking/{id}` | 200 | Same cookie auth |
+| `DELETE /booking/{id}` | **201** | Not 200/204 |
+| `DELETE /booking/{nonexistent}` + valid auth | **405** | Not 404 |
+| `POST /booking` with missing fields | **500** | Not 400/422 |
 
 ### Cookie auth — not Bearer
-
-Writes (PUT, PATCH, DELETE) authenticate via a **cookie**, not an `Authorization` header:
 
 ```gherkin
 # CORRECT — cookie auth
 And cookie token = authToken
 
-# WRONG — server returns 403
+# WRONG — server (and mock) returns 403
 And header Authorization = 'Bearer ' + authToken
 ```
-
-### Heroku quirks
-
-- **Auto-reset**: The API resets its database every 10 minutes. During the reset window all write operations return `418 I'm a Teapot`. Wait a moment and retry.
-- **Cold start**: Free-tier Heroku dynos sleep when idle. The first request after a sleep may take 10–20 s; the 30-second timeout in `karate-config.js` handles this.
 
 ---
 
@@ -68,89 +88,87 @@ And header Authorization = 'Bearer ' + authToken
 
 ---
 
-## Feature File Structure
+## Project Structure
 
 ```
 src/test/resources/
-├── karate-config.js              # env, baseUrl, credentials, timeouts
-├── logback-test.xml              # quiet logging
+├── karate-config.js              # env switch: mock (default) vs real
+├── logback-test.xml
+├── mock/
+│   ├── restful-booker-mock.feature  # stateful in-memory mock server
+│   └── mock-start.feature           # boots mock via callSingle (once per JVM)
 ├── features/
 │   ├── auth/
-│   │   └── create-token.feature  # returns authToken
+│   │   └── create-token.feature
 │   ├── bookings/
 │   │   ├── create-booking.feature
 │   │   ├── get-booking.feature
 │   │   ├── update-booking.feature
 │   │   ├── delete-booking.feature
-│   │   └── z-booking-negative.feature   # z- prefix → runs last (see Known Limitations)
+│   │   └── z-booking-negative.feature
 │   └── reusable/
-│       ├── create-test-booking.feature  # @ignore — called by other features
-│       └── delete-test-booking.feature  # @ignore — cleanup helper
+│       ├── create-test-booking.feature  # @ignore — test-data setup
+│       └── delete-test-booking.feature  # @ignore — cleanup
 ├── data/
 │   ├── valid-booking.json
 │   ├── invalid-booking.json
-│   └── booking-examples.csv      # 4 rows for Scenario Outline
+│   └── booking-examples.csv             # 4 rows for Scenario Outline
 └── schemas/
-    ├── booking-schema.json        # Karate fuzzy-match schema for GET /booking/{id}
+    ├── booking-schema.json
     └── error-schema.json
 ```
+
+### How the mock boots
+
+`karate-config.js` calls `karate.callSingle('classpath:mock/mock-start.feature')` when `env == 'mock'`. `callSingle` caches the result across parallel threads, so the mock server starts exactly once per JVM regardless of thread count. The port is random (`port: 0`) and stored in `config.baseUrl`.
 
 ### How auth works
 
 ```gherkin
-# In Background (once per feature via callonce):
+# Once per feature via callonce:
 * def authResult = callonce read('classpath:features/auth/create-token.feature')
 * def authToken  = authResult.authToken
 
-# In scenarios that need writes:
-And cookie token = authToken   # ← cookie, not Bearer
+# On write scenarios:
+And cookie token = authToken
 ```
 
 ---
 
 ## How to Run
 
-### Run all tests (parallel, 2 threads)
+### Run all tests (mock, parallel, 2 threads)
 
 ```bash
 mvn clean test
 ```
 
-Reports are written to `target/karate-reports/`.
+### Run against the live Restful Booker (opt-in, once)
+
+```bash
+mvn clean test -Dkarate.env=real
+```
+
+> May return 418 from cloud IPs or throttle after repeated runs.
 
 ### Run by tag
 
 ```bash
-# Smoke tests only
 mvn clean test -Dkarate.options='--tags @smoke'
-
-# Exclude negative tests
 mvn clean test -Dkarate.options='--tags ~@negative'
 ```
 
 ### Run a single feature from IDE
 
-Open `KarateTestRunner.java` → right-click → **Run**. The `testAll()` and `testSmoke()` methods map to the two common modes.
-
-### Run by tag (parallel runner from command line)
-
-Add the tag to the `Runner` call in `ParallelTestRunner`, or use the system property variant:
-
-```bash
-mvn clean test -Dkarate.options='--tags @regression'
-```
+Open `KarateTestRunner.java` → right-click → **Run**.
 
 ---
 
 ## How to View Reports
 
-After `mvn clean test`, open:
-
 ```
 target/karate-reports/karate-summary.html
 ```
-
-Each feature also has its own HTML report in `target/karate-reports/`.
 
 ---
 
@@ -158,61 +176,28 @@ Each feature also has its own HTML report in `target/karate-reports/`.
 
 | File | Purpose |
 |---|---|
-| `data/valid-booking.json` | Baseline valid booking payload for create tests |
-| `data/invalid-booking.json` | Intentionally incomplete — tests server's 500 response |
-| `data/booking-examples.csv` | 4 rows of booking data for `Scenario Outline` |
-| Reusable features | `create-test-booking.feature` generates isolated test data per scenario; `delete-test-booking.feature` cleans up |
-
-Schema files (`schemas/`) use Karate's fuzzy-match markers (`#string`, `#number`, `#boolean`, `##string` for optional) so they can be used directly in `match response ==` assertions.
+| `data/valid-booking.json` | Baseline valid payload for create tests |
+| `data/invalid-booking.json` | Intentionally incomplete — tests the 500 response |
+| `data/booking-examples.csv` | 4 rows for `Scenario Outline` |
+| Reusable features | `create-test-booking` generates isolated test data; `delete-test-booking` cleans up |
 
 ---
 
 ## CI/CD
 
-The GitHub Actions workflow (`.github/workflows/karate-tests.yml`) runs on every push and pull request to `main`:
+The GitHub Actions workflow (`.github/workflows/karate-tests.yml`) runs on every push/PR to `main`:
 
-1. Check out code
-2. Set up Java 17 (Temurin)
-3. Cache `~/.m2`
-4. `mvn -B clean test`
-5. Upload `target/karate-reports/` and `target/surefire-reports/` as artifacts (always, even on failure)
-
-Credentials default to `admin` / `password123` (the public demo creds). In a real project, store them in GitHub Secrets and pass as `-Dqa.username` / `-Dqa.password`.
+1. Checkout → Java 17 (Temurin) → Maven cache
+2. `mvn -B clean test` — uses the built-in mock by default, no internet needed
+3. Upload `target/karate-reports/` and `target/surefire-reports/` as artifacts
 
 ---
 
-## Known Limitations
+## What This Demonstrates
 
-### Restful Booker is a shared public API
-
-- **Auto-reset every 10 minutes**: During the reset, POST/PUT/PATCH/DELETE return `418 I'm a Teapot`. If a local run fails with 418, wait a minute and retry.
-- **No data isolation**: Other users share the same bookings. Tests create their own bookings and clean up where possible, but the `/booking` list may contain bookings from other users.
-- **Deliberate bugs**: Some invalid payloads return `500` instead of `400`; DELETE returns `201` not `204`. Tests assert the _actual_ behavior and include `# quirk:` comments.
-
-### Why `z-booking-negative.feature` is prefixed with `z-`
-
-The scenario that POSTs an invalid booking (expecting `500`) causes the Restful Booker server to enter a temporary rate-limit state where subsequent POST /booking requests in the same Heroku connection return `418`. Prefixing the file with `z-` ensures it sorts _after_ all other booking features, so the invalid POST runs last and cannot poison earlier tests.
-
-### Local rate limiting after many runs
-
-Running the full suite many times in quick succession can exhaust the Heroku API's per-session request quota (which resets with the 10-minute auto-reset). GitHub Actions runs from a fresh IP on each workflow trigger and is not affected.
-
----
-
-## What I Learned
-
-- **Karate is readability-first**: chaining `Given/When/Then` steps in feature files is far more readable than equivalent Java code, and `callonce`/`call` for reusable features keeps setup DRY.
-- **Cookie auth vs Bearer**: The Restful Booker silently rejects `Authorization: Bearer` with 403; only the `token` cookie works. Always read the API docs before assuming conventional auth patterns.
-- **Real APIs have real quirks**: `DELETE → 201`, `GET /ping → 201`, `POST with bad body → 500` — testing against an actual hosted API forces you to assert real behaviour, not idealised behaviour.
-- **Execution order matters**: The `z-` prefix convention is a lightweight way to control feature ordering in Karate's parallel runner without requiring custom runner code.
-- **`callonce` vs `call`**: `callonce` runs once per JVM (perfect for auth tokens), `call` runs per scenario (correct for test-data setup that must be fresh each time).
-
----
-
-## Next Improvements
-
-- Add a WireMock or Testcontainers-based local mock so the suite runs without internet and without API rate limits.
-- Add `@afterScenario` hooks for automatic cleanup of created bookings.
-- Parametrise the thread count via a Maven property (`-Dkarate.threads=4`) rather than a hard-coded literal.
-- Add negative schema tests for error responses once the API returns consistent error JSON.
-- Integrate Karate's HTML report into a CI/CD dashboard (e.g., Allure or GitHub Pages artifact).
+- **Karate mock server** — `karate.start()` boots a stateful HTTP mock from a `.feature` file; `callSingle` ensures it starts once for parallel-safe execution
+- **Karate readability** — `Given/When/Then` in feature files is far more readable than equivalent Java; `callonce`/`call` keeps setup DRY
+- **Cookie auth vs Bearer** — the API (and mock) silently reject `Authorization: Bearer` with 403; only the `token` cookie works
+- **Real quirks, real assertions** — `DELETE → 201`, `ping → 201`, `POST bad body → 500` — the mock preserves the same behaviour so tests stay realistic
+- **Parallel execution** — 2-thread parallel runner via `Runner.path(...).parallel(2)` with thread-safe shared mock state
+- **`callonce` vs `call`** — `callonce` for auth tokens (once per JVM), `call` for test-data setup (fresh per scenario)
